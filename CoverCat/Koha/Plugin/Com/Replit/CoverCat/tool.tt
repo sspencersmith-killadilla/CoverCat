@@ -1,0 +1,215 @@
+[% INCLUDE 'doc-head-open.inc' title = 'CoverCat - MARC from book covers' %]
+[% INCLUDE 'doc-head-close.inc' %]
+
+<body id="covercat_tool" class="tools">
+[% INCLUDE 'header.inc' %]
+[% INCLUDE 'cat-search.inc' %]
+
+<div id="breadcrumbs">
+    <a href="/cgi-bin/koha/mainpage.pl">Home</a>
+    &rsaquo; <a href="/cgi-bin/koha/plugins/plugins-home.pl">Plugins</a>
+    &rsaquo; CoverCat
+</div>
+
+<div class="main container-fluid">
+    <h1>CoverCat</h1>
+    <p>Generate a draft MARC 21 record from book-cover images. Review it before importing it into your catalog.</p>
+    [% UNLESS api_key_configured %]
+        <div class="alert alert-warning">AI access is not configured. A plugin administrator can
+            <a href="/cgi-bin/koha/plugins/run.pl?class=[% CLASS | uri %]&amp;method=configure">configure CoverCat</a>
+            to add an API key, endpoint, and model.</div>
+    [% END %]
+
+    [% IF error %]
+        <div class="alert alert-danger" role="alert">[% error | html %]</div>
+    [% END %]
+
+    <form method="post" action="/cgi-bin/koha/plugins/run.pl" enctype="multipart/form-data" class="form">
+        <input type="hidden" name="class" value="[% CLASS | html %]">
+        <input type="hidden" name="method" value="tool">
+        <input type="hidden" name="op" value="cud-generate">
+        <input type="hidden" name="csrf_token" value="[% covercat_csrf_token | html %]">
+        <fieldset class="rows">
+            <legend>Book cover images</legend>
+            <ol>
+                <li>
+                    <label for="front_image">Front cover (required)</label>
+                    <input id="front_image" name="front_image" type="file"
+                        accept="image/jpeg,image/png,image/webp,image/gif" required>
+                    <span class="hint">JPEG, PNG, WebP, or GIF; maximum 8 MB.</span>
+                </li>
+                <li>
+                    <label for="back_image">Back cover (optional)</label>
+                    <input id="back_image" name="back_image" type="file"
+                        accept="image/jpeg,image/png,image/webp,image/gif">
+                    <span class="hint">Useful for ISBN, publisher, and summary details.</span>
+                </li>
+            </ol>
+        </fieldset>
+        <p>
+            <button type="submit" class="btn btn-primary">
+                Generate draft record
+            </button>
+        </p>
+    </form>
+
+    [% IF record_json %]
+        <section aria-labelledby="record-heading">
+            <h2 id="record-heading">Review and edit the draft</h2>
+            <p>Correct the JSON if needed, then download a MARC transmission-format file. Verify all fields against the book before cataloging.</p>
+            <label for="record-json">MARC JSON</label>
+            <textarea id="record-json" rows="28" class="form-control"
+                spellcheck="false">[% record_json | html %]</textarea>
+            <p>
+                <button type="button" id="download-mrc" class="btn btn-primary">Download .mrc</button>
+                <button type="button" id="download-json" class="btn btn-default">Download JSON</button>
+            </p>
+            <div id="download-error" class="alert alert-danger" role="alert" hidden></div>
+        </section>
+    [% END %]
+</div>
+
+[% INCLUDE 'intranet-bottom.inc' %]
+
+[% IF record_json %]
+<script>
+(() => {
+    const editor = document.getElementById("record-json");
+    const errorBox = document.getElementById("download-error");
+    const encoder = new TextEncoder();
+    const FT = 0x1e;
+    const SD = 0x1f;
+    const RT = 0x1d;
+
+    function bytesForField(field) {
+        if (!/^\d{3}$/.test(field.tag)) throw new Error("Every MARC tag must be three digits.");
+        const bytes = [];
+        const encodeValue = (value) => {
+            if (typeof value !== "string" || /[\x1d-\x1f]/.test(value)) {
+                throw new Error("MARC values must be text without embedded MARC delimiters.");
+            }
+            return encoder.encode(value);
+        };
+        if (field.kind === "control") {
+            if (!/^00[1-9]$/.test(field.tag)) throw new Error("Control fields must have tags 001–009.");
+            bytes.push(...encodeValue(field.value), FT);
+            return bytes;
+        }
+        if (field.tag < "010") throw new Error("Data fields must have tags 010 or higher.");
+
+        const ind1 = field.ind1 === "" ? " " : field.ind1;
+        const ind2 = field.ind2 === "" ? " " : field.ind2;
+        if (typeof ind1 !== "string" || typeof ind2 !== "string"
+            || !/^[ -~]$/.test(ind1) || !/^[ -~]$/.test(ind2)) {
+            throw new Error("MARC indicators must each be one single-byte character.");
+        }
+        bytes.push(...encoder.encode(ind1), ...encoder.encode(ind2));
+        if (!Array.isArray(field.subfields)) throw new Error("A data field needs a subfields array.");
+        for (const sf of field.subfields) {
+            if (typeof sf.code !== "string" || !/^[0-9a-z]$/.test(sf.code)) {
+                throw new Error("Each subfield code must be one lowercase letter or digit.");
+            }
+            if (typeof sf.value !== "string") throw new Error("Subfield values must be text.");
+            bytes.push(SD, ...encoder.encode(sf.code), ...encodeValue(sf.value));
+        }
+        bytes.push(FT);
+        return bytes;
+    }
+
+    function buildMrc(record) {
+        if (!record || !Array.isArray(record.controlFields) || !Array.isArray(record.dataFields)) {
+            throw new Error("Record JSON must contain leader, controlFields, and dataFields.");
+        }
+        const fields = [
+            ...record.controlFields.map((field) => ({ ...field, kind: "control" })),
+            ...record.dataFields.map((field) => ({ ...field, kind: "data" })),
+        ].map((field) => ({ tag: field.tag, bytes: bytesForField(field) }));
+
+        let directory = "";
+        let start = 0;
+        for (const field of fields) {
+            if (field.bytes.length > 9999 || start > 99999) throw new Error("The record is too large for MARC format.");
+            directory += field.tag + String(field.bytes.length).padStart(4, "0") + String(start).padStart(5, "0");
+            start += field.bytes.length;
+        }
+        const directoryBytes = [...encoder.encode(directory), FT];
+        const baseAddress = 24 + directoryBytes.length;
+        const totalLength = baseAddress + start + 1;
+        if (totalLength > 99999 || baseAddress > 99999) throw new Error("The record exceeds the MARC 21 record-length limit.");
+
+        const leader = Array.from((record.leader || "00000nam a2200000 a 4500").padEnd(24, " ").slice(0, 24));
+        if (leader.some((character) => !/^[ -~]$/.test(character))) throw new Error("The leader must contain only ASCII characters.");
+        leader[5] = "n";
+        leader[6] = leader[6] && leader[6] !== "0" ? leader[6] : "a";
+        leader[7] = leader[7] && leader[7] !== "0" ? leader[7] : "m";
+        leader[9] = "a";
+        leader[10] = "2";
+        leader[11] = "2";
+        leader[20] = "4";
+        leader[21] = "5";
+        leader[22] = "0";
+        leader[23] = "0";
+        const l = leader.join("").split("");
+        String(totalLength).padStart(5, "0").split("").forEach((c, i) => { l[i] = c; });
+        String(baseAddress).padStart(5, "0").split("").forEach((c, i) => { l[12 + i] = c; });
+
+        const output = [
+            ...encoder.encode(l.join("")),
+            ...directoryBytes,
+            ...fields.flatMap((field) => field.bytes),
+            RT,
+        ];
+        return new Uint8Array(output);
+    }
+
+    function download(blob, filename) {
+        const link = document.createElement("a");
+        const url = URL.createObjectURL(blob);
+        link.href = url;
+        link.download = filename;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+
+    function filenameFor(record, extension) {
+        const title = (record.dataFields || []).find((f) => f.tag === "245");
+        const titleText = title && title.subfields && title.subfields.find((s) => s.code === "a");
+        const base = (titleText ? titleText.value : "covercat-record")
+            .toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 48) || "covercat-record";
+        return `${base}.${extension}`;
+    }
+
+    function parseRecord() {
+        const record = JSON.parse(editor.value);
+        if (!record || typeof record.leader !== "string") throw new Error("Record JSON needs a leader string.");
+        return record;
+    }
+
+    document.getElementById("download-mrc").addEventListener("click", () => {
+        try {
+            errorBox.hidden = true;
+            const record = parseRecord();
+            download(new Blob([buildMrc(record)], { type: "application/marc" }), filenameFor(record, "mrc"));
+        } catch (error) {
+            errorBox.textContent = error.message || "Could not create the MARC file.";
+            errorBox.hidden = false;
+        }
+    });
+
+    document.getElementById("download-json").addEventListener("click", () => {
+        try {
+            errorBox.hidden = true;
+            const record = parseRecord();
+            download(new Blob([JSON.stringify(record, null, 2)], { type: "application/json" }), filenameFor(record, "json"));
+        } catch (error) {
+            errorBox.textContent = error.message || "Could not create the JSON file.";
+            errorBox.hidden = false;
+        }
+    });
+})();
+</script>
+[% END %]
+</body>
+</html>

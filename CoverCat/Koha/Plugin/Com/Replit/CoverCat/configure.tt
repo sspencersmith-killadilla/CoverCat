@@ -1,0 +1,98 @@
+[% INCLUDE 'doc-head-open.inc' title = 'Configure CoverCat' %]
+[% INCLUDE 'doc-head-close.inc' %]
+<body id="covercat_configure" class="tools">
+[% INCLUDE 'header.inc' %]
+[% INCLUDE 'cat-search.inc' %]
+<div class="main container-fluid">
+    <h1>Configure CoverCat</h1>
+    <p>These settings apply to this Koha instance. Only staff with Koha's plugin-configuration permission should have access to this page.</p>
+    [% IF error %]<div class="alert alert-danger" role="alert">[% error | html %]</div>[% END %]
+    [% IF saved %]<div class="alert alert-success" role="status">Settings saved. This does not verify the credential or model; generate a sample book to test them.</div>[% END %]
+    <p><strong>API key status:</strong>
+        [% IF environment_key %]Configured by the server environment.
+        [% ELSIF api_key_configured %]A key is saved in Koha's plugin database.
+        [% ELSE %]Not configured.[% END %]
+    </p>
+    <div class="alert alert-warning">
+        <strong>Credential storage:</strong> Keys entered here are stored unencrypted in Koha's plugin_data database table and may appear in database backups.
+        The saved key is never displayed or prefilled. Restrict plugin-configuration permissions, database access, and backups.
+        Use HTTPS for the staff interface. A host-managed environment variable remains available as an alternative.
+    </div>
+    <form method="post" action="/cgi-bin/koha/plugins/run.pl" autocomplete="off">
+        <input type="hidden" name="class" value="[% CLASS | html %]">
+        <input type="hidden" name="method" value="configure">
+        <input type="hidden" name="op" value="cud-save-config">
+        <input type="hidden" name="csrf_token" value="[% covercat_csrf_token | html %]">
+        <fieldset class="rows">
+            <legend>AI provider settings</legend>
+            <ol>
+                <li>
+                    <label for="ai_provider">AI provider</label>
+                    <select id="ai_provider" name="ai_provider" [% IF provider_locked %]disabled[% END %]>
+                        [% FOREACH provider IN provider_options %]
+                            <option value="[% provider.id | html %]"
+                                data-endpoint="[% provider.endpoint | html %]"
+                                [% IF provider.selected %]selected[% END %]>[% provider.label | html %]</option>
+                        [% END %]
+                    </select>
+                    [% IF provider_locked %]
+                        <input type="hidden" name="ai_provider" value="[% ai_provider | html %]">
+                    [% END %]
+                    <span class="hint">OpenAI, Gemini, and Claude use fixed approved endpoints. Switching provider requires a replacement key or explicit key removal. Host-managed settings lock the provider.</span>
+                </li>
+                <li>
+                    <label for="ai_endpoint">API endpoint</label>
+                    <input type="url" id="ai_endpoint" name="ai_endpoint" size="65"
+                        value="[% ai_endpoint | html %]" required
+                        [% IF endpoint_locked %]readonly[% END %]>
+                    <span class="hint">Set automatically for built-in providers. Only Custom endpoints need server approval through COVERCAT_AI_ALLOWED_HOSTS. No server allowlist changes are needed for built-in Google or Anthropic endpoints.</span>
+                </li>
+                <li>
+                    <label for="ai_model">Model</label>
+                    <input type="text" id="ai_model" name="ai_model" maxlength="200"
+                        value="[% ai_model | html %]" required
+                        [% IF model_locked %]readonly[% END %]>
+                    <span class="hint">Enter an exact API model ID available to your provider account. It must support images and structured JSON output. For Claude, use a model supporting output_config.format.</span>
+                </li>
+                <li>
+                    <label for="ai_api_key">New or replacement API key</label>
+                    <input type="password" id="ai_api_key" name="ai_api_key"
+                        autocomplete="new-password" maxlength="4096"
+                        [% IF environment_key %]disabled[% END %]>
+                    <span class="hint">Leave blank to keep the current key. This field is always empty when the page loads.</span>
+                </li>
+                <li>
+                    <label for="acknowledge_storage">Storage acknowledgement</label>
+                    <input type="checkbox" id="acknowledge_storage" name="acknowledge_storage" value="1">
+                    I understand that a new key will be saved unencrypted in the Koha database.
+                </li>
+                <li>
+                    <label for="remove_api_key">Remove saved database key</label>
+                    <input type="checkbox" id="remove_api_key" name="remove_api_key" value="1">
+                    This does not remove or disable a host-managed environment credential.
+                </li>
+            </ol>
+        </fieldset>
+        <p><button type="submit" class="btn btn-primary">Save configuration</button></p>
+    </form>
+    <p><a href="/cgi-bin/koha/plugins/run.pl?class=[% CLASS | uri %]&amp;method=tool">Open CoverCat</a></p>
+</div>
+[% INCLUDE 'intranet-bottom.inc' %]
+<script>
+(() => {
+    const provider = document.getElementById("ai_provider");
+    const endpoint = document.getElementById("ai_endpoint");
+    const model = document.getElementById("ai_model");
+    provider.addEventListener("change", () => {
+        const option = provider.options[provider.selectedIndex];
+        endpoint.value = option.dataset.endpoint || "";
+        endpoint.readOnly = provider.value !== "custom";
+        if (!model.readOnly) {
+            model.value = "";
+            model.placeholder = "Enter the selected provider's API model ID";
+        }
+    });
+})();
+</script>
+</body>
+</html>
